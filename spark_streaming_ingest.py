@@ -1,0 +1,71 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, to_timestamp, to_date
+from pyspark.sql.types import StructType, StructField, StringType, DoubleType
+
+RAW_PATH = "output/reactor_readings"         
+DELTA_PATH = "delta/reactor_telemetry"       
+CHECKPOINT_PATH = "checkpoint/reactor_telemetry" 
+
+def create_spark():
+    return (
+        SparkSession.builder
+        .appName("MicroreactorTelemetryStreamingIngest")
+        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+        .getOrCreate()
+    )
+
+
+def get_schema():
+    return StructType([
+        StructField("reactor_id", StringType(), True),
+        StructField("power_mw", DoubleType(), True),
+        StructField("coolant_temp_c", DoubleType(), True),
+        StructField("coolant_pressure_mpa", DoubleType(), True),
+        StructField("coolant_flow_kg_s", DoubleType(), True),
+        StructField("neutron_flux_nv", DoubleType(), True),
+        StructField("control_rod_position_pct", DoubleType(), True),
+        StructField("vibration_mm_s", DoubleType(), True),
+        StructField("core_inlet_temp_c", DoubleType(), True),
+        StructField("core_outlet_temp_c", DoubleType(), True),
+        StructField("event_time", StringType(), True),
+    ])
+
+
+def main():
+    spark = create_spark()
+    spark.sparkContext.setLogLevel("WARN")
+
+    schema = get_schema()
+
+    # 1. Streaming read of JSON
+    raw_stream = (
+        spark.readStream
+        .schema(schema)
+        .option("maxFilesPerTrigger", 1)  # nice for testing
+        .json(RAW_PATH)
+    )
+
+    # 2. Add timestamp and partition columns
+    enriched = (
+        raw_stream
+        .withColumn("event_ts", to_timestamp(col("event_time")))
+        .withColumn("event_date", to_date(col("event_ts")))
+    )
+
+    # 3. Stream write into Delta
+    query = (
+        enriched.writeStream
+        .format("delta")
+        .outputMode("append")
+        .option("checkpointLocation", CHECKPOINT_PATH)
+        .partitionBy("reactor_id", "event_date")
+        .start(DELTA_PATH)
+    )
+
+    print("=== Streaming ingest started; press Ctrl+C to stop ===")
+    query.awaitTermination()
+
+
+if __name__ == "__main__":
+    main()
